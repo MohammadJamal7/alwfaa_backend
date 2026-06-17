@@ -1,13 +1,20 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
 import pool from './config/db.js';
 import createTables from './config/schema.js';
 import { authenticateToken, optionalAuth } from './middleware/auth.js';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -15,6 +22,30 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Serve uploaded images
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Multer config for image upload
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, path.join(__dirname, '../uploads'));
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${uuidv4()}${ext}`);
+  }
+});
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|gif|webp/;
+    const ext = allowed.test(path.extname(file.originalname).toLowerCase());
+    const mime = allowed.test(file.mimetype);
+    cb(null, ext && mime);
+  }
+});
 
 // Initialize database tables
 createTables();
@@ -100,6 +131,23 @@ app.post('/api/products', async (req, res) => {
       [name, slug, description, price, image, category_id, is_featured || false]
     );
     res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Search Products
+app.get('/api/products/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) {
+      return res.json([]);
+    }
+    const result = await pool.query(
+      `SELECT * FROM products WHERE is_active = true AND (name ILIKE $1 OR description ILIKE $1) ORDER BY created_at DESC`,
+      [`%${q}%`]
+    );
+    res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -447,6 +495,122 @@ app.put('/api/auth/password', authenticateToken, async (req, res) => {
     await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.user.id]);
     
     res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Image Upload
+app.post('/api/upload', authenticateToken, upload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const url = `/uploads/${req.file.filename}`;
+    res.json({ url, filename: req.file.filename });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cart: update item quantity
+app.put('/api/cart/:id', async (req, res) => {
+  try {
+    const { quantity } = req.body;
+    await pool.query('UPDATE cart_items SET quantity = $1 WHERE id = $2', [quantity, req.params.id]);
+    res.json({ message: 'Cart updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: update product
+app.put('/api/admin/products/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, description, price, image, category_id, is_featured, is_active } = req.body;
+    const slug = name ? name.toLowerCase().replace(/[^a-z0-9أ-ي]/g, '-').replace(/-+/g, '-') : undefined;
+    const result = await pool.query(
+      `UPDATE products SET name = COALESCE($1, name), slug = COALESCE($2, slug), description = COALESCE($3, description), price = COALESCE($4, price), image = COALESCE($5, image), category_id = COALESCE($6, category_id), is_featured = COALESCE($7, is_featured), is_active = COALESCE($8, is_active) WHERE id = $9 RETURNING *`,
+      [name, slug, description, price, image, category_id, is_featured, is_active, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: delete product
+app.delete('/api/admin/products/:id', authenticateToken, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM products WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Product deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: get all orders
+app.get('/api/admin/orders', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT o.*, json_agg(json_build_object('id', oi.id, 'product_id', oi.product_id, 'quantity', oi.quantity, 'price', oi.price, 'name', p.name)) FILTER (WHERE oi.id IS NOT NULL) as items
+       FROM orders o 
+       LEFT JOIN order_items oi ON o.id = oi.order_id 
+       LEFT JOIN products p ON oi.product_id = p.id 
+       GROUP BY o.id ORDER BY o.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: update order status
+app.put('/api/admin/orders/:id/status', authenticateToken, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const result = await pool.query('UPDATE orders SET status = $1 WHERE id = $2 RETURNING *', [status, req.params.id]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: get/store settings
+app.get('/api/admin/settings', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT key, value FROM settings');
+    const settings = {};
+    result.rows.forEach(row => { settings[row.key] = row.value; });
+    res.json(settings);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/admin/settings', authenticateToken, async (req, res) => {
+  try {
+    const settings = req.body;
+    for (const [key, value] of Object.entries(settings)) {
+      await pool.query(
+        'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+        [key, value]
+      );
+    }
+    res.json({ message: 'Settings updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: get all products (including inactive)
+app.get('/api/admin/products', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.created_at DESC'
+    );
+    res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
