@@ -1,4 +1,5 @@
 import pool from './db.js';
+import bcrypt from 'bcryptjs';
 
 const createTables = async () => {
   try {
@@ -145,6 +146,15 @@ const createTables = async () => {
       ON CONFLICT (slug) DO NOTHING
     `);
     console.log('✅ Default pages inserted');
+
+    // Create default admin user
+    const adminPassword = await bcrypt.hash('admin123', 10);
+    await pool.query(`
+      INSERT INTO users (name, email, password, role) VALUES 
+        ('مدير النظام', 'admin@alwfaa.com', $1, 'admin')
+      ON CONFLICT (email) DO NOTHING
+    `, [adminPassword]);
+    console.log('✅ Default admin user created');
 
     console.log('🎉 All tables created successfully!');
   } catch (error) {

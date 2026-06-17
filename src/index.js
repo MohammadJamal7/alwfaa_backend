@@ -217,30 +217,34 @@ app.delete('/api/cart/:id', async (req, res) => {
 });
 
 // Orders Routes
-app.post('/api/orders', async (req, res) => {
+app.post('/api/orders', optionalAuth, async (req, res) => {
   try {
-    const { user_id, customer_name, customer_phone, customer_email, items, notes } = req.body;
+    const { customer_name, customer_phone, customer_email, items, notes } = req.body;
+    const userId = req.user?.id || null;
     
     // Calculate total
     let total = 0;
     for (const item of items) {
-      const product = await pool.query('SELECT price FROM products WHERE id = $1', [item.product_id]);
-      total += product.rows[0].price * item.quantity;
+      const unitPrice = item.price || 0;
+      total += unitPrice * item.quantity;
     }
 
     // Create order
     const order = await pool.query(
       `INSERT INTO orders (user_id, customer_name, customer_phone, customer_email, total, notes) 
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [user_id, customer_name, customer_phone, customer_email, total, notes]
+      [userId, customer_name, customer_phone, customer_email, total, notes]
     );
 
     // Add order items
+    const orderId = order.rows[0].id;
     for (const item of items) {
-      const product = await pool.query('SELECT price FROM products WHERE id = $1', [item.product_id]);
+      const unitPrice = item.price || 0;
+      const exists = await pool.query('SELECT id FROM products WHERE id = $1', [item.product_id]);
+      const productId = exists.rows.length > 0 ? item.product_id : null;
       await pool.query(
         'INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ($1, $2, $3, $4)',
-        [order.rows[0].id, item.product_id, item.quantity, product.rows[0].price]
+        [orderId, productId, item.quantity, unitPrice]
       );
     }
 
@@ -519,6 +523,27 @@ app.put('/api/cart/:id', async (req, res) => {
     const { quantity } = req.body;
     await pool.query('UPDATE cart_items SET quantity = $1 WHERE id = $2', [quantity, req.params.id]);
     res.json({ message: 'Cart updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: create product
+app.post('/api/admin/products', authenticateToken, async (req, res) => {
+  try {
+    const { name, description, price, image, category_id } = req.body;
+    if (!name || !price) return res.status(400).json({ error: 'Name and price are required' });
+    const slug = name.toLowerCase().replace(/[^a-z0-9أ-ي]/g, '-').replace(/-+/g, '-');
+    let resolvedCategoryId = category_id || null;
+    if (resolvedCategoryId) {
+      const cat = await pool.query('SELECT id FROM categories WHERE id = $1', [resolvedCategoryId]);
+      if (cat.rows.length === 0) resolvedCategoryId = null;
+    }
+    const result = await pool.query(
+      'INSERT INTO products (name, slug, description, price, image, category_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [name, slug + '-' + Date.now(), description, price, image, resolvedCategoryId]
+    );
+    res.status(201).json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
