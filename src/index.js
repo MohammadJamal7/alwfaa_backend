@@ -47,6 +47,27 @@ const upload = multer({
   }
 });
 
+// Multer config for document upload
+const docStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, path.join(__dirname, '../uploads'));
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${uuidv4()}${ext}`);
+  }
+});
+const docUpload = multer({
+  storage: docStorage,
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|txt|csv/;
+    const ext = allowed.test(path.extname(file.originalname).toLowerCase());
+    const mime = allowed.test(file.mimetype);
+    cb(null, ext || mime);
+  }
+});
+
 // Initialize database tables
 createTables();
 
@@ -517,6 +538,34 @@ app.post('/api/upload', authenticateToken, upload.single('image'), (req, res) =>
   }
 });
 
+// Document Upload
+app.post('/api/upload/document', authenticateToken, docUpload.single('file'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const url = `/uploads/${req.file.filename}`;
+    res.json({ url, filename: req.file.filename, originalName: req.file.originalname });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Download document (resolves to the stored file)
+app.get('/api/download/:filename', async (req, res) => {
+  try {
+    const filePath = path.join(__dirname, '../uploads', path.basename(req.params.filename));
+    res.download(filePath, (err) => {
+      if (err && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      if (err) throw err;
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Cart: update item quantity
 app.put('/api/cart/:id', async (req, res) => {
   try {
@@ -531,7 +580,7 @@ app.put('/api/cart/:id', async (req, res) => {
 // Admin: create product
 app.post('/api/admin/products', authenticateToken, async (req, res) => {
   try {
-    const { name, description, price, image, category_id } = req.body;
+    const { name, description, price, image, category_id, file_url, file_name } = req.body;
     if (!name || !price) return res.status(400).json({ error: 'Name and price are required' });
     const slug = name.toLowerCase().replace(/[^a-z0-9أ-ي]/g, '-').replace(/-+/g, '-');
     let resolvedCategoryId = category_id || null;
@@ -540,8 +589,8 @@ app.post('/api/admin/products', authenticateToken, async (req, res) => {
       if (cat.rows.length === 0) resolvedCategoryId = null;
     }
     const result = await pool.query(
-      'INSERT INTO products (name, slug, description, price, image, category_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [name, slug + '-' + Date.now(), description, price, image, resolvedCategoryId]
+      'INSERT INTO products (name, slug, description, price, image, category_id, file_url, file_name) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [name, slug + '-' + Date.now(), description, price, image, resolvedCategoryId, file_url || null, file_name || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -552,11 +601,11 @@ app.post('/api/admin/products', authenticateToken, async (req, res) => {
 // Admin: update product
 app.put('/api/admin/products/:id', authenticateToken, async (req, res) => {
   try {
-    const { name, description, price, image, category_id, is_featured, is_active } = req.body;
+    const { name, description, price, image, category_id, is_featured, is_active, file_url, file_name } = req.body;
     const slug = name ? name.toLowerCase().replace(/[^a-z0-9أ-ي]/g, '-').replace(/-+/g, '-') : undefined;
     const result = await pool.query(
-      `UPDATE products SET name = COALESCE($1, name), slug = COALESCE($2, slug), description = COALESCE($3, description), price = COALESCE($4, price), image = COALESCE($5, image), category_id = COALESCE($6, category_id), is_featured = COALESCE($7, is_featured), is_active = COALESCE($8, is_active) WHERE id = $9 RETURNING *`,
-      [name, slug, description, price, image, category_id, is_featured, is_active, req.params.id]
+      `UPDATE products SET name = COALESCE($1, name), slug = COALESCE($2, slug), description = COALESCE($3, description), price = COALESCE($4, price), image = COALESCE($5, image), category_id = COALESCE($6, category_id), is_featured = COALESCE($7, is_featured), is_active = COALESCE($8, is_active), file_url = COALESCE($9, file_url), file_name = COALESCE($10, file_name) WHERE id = $11 RETURNING *`,
+      [name, slug, description, price, image, category_id, is_featured, is_active, file_url, file_name, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
     res.json(result.rows[0]);
